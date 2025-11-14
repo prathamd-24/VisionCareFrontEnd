@@ -46,10 +46,15 @@ export default function Dashboard() {
   const [leftEyeRedness, setLeftEyeRedness] = useState(0);
   const [rightEyeRedness, setRightEyeRedness] = useState(0);
   const [opencvLoaded, setOpencvLoaded] = useState(false);
+  const [currentBPM, setCurrentBPM] = useState(0);
+  const [emotionHistory, setEmotionHistory] = useState<string[]>([]);
   const blinkStateRef = useRef(false);
   const startTimeRef = useRef(Date.now());
   const emotionIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const rednessIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const lastMinuteRef = useRef(Date.now());
+  const blinksThisMinuteRef = useRef(0);
+  const recentBlinksRef = useRef<number[]>([]);
 
   // Check authentication
   useEffect(() => {
@@ -111,7 +116,14 @@ export default function Dashboard() {
             (a, b) => b[1] - a[1]
           );
           const [emotionName, confidence] = sorted[0];
+          const emotionStr = `${emotionName}`;
           setEmotion(`${emotionName} (${(confidence * 100).toFixed(1)}%)`);
+          
+          // Track emotion history (keep last 20)
+          setEmotionHistory(prev => {
+            const newHistory = [...prev, emotionStr];
+            return newHistory.slice(-20);
+          });
         }
       } catch (err) {
         console.error("Emotion detection error:", err);
@@ -224,18 +236,37 @@ export default function Dashboard() {
     };
   }, [opencvLoaded, eyesDetected]);
 
+  // Periodic BPM update (clean up old blinks every 5 seconds)
+  useEffect(() => {
+    const bpmUpdateInterval = setInterval(() => {
+      const now = Date.now();
+      const oneMinuteAgo = now - 60000;
+      
+      // Remove blinks older than 60 seconds
+      recentBlinksRef.current = recentBlinksRef.current.filter(t => t > oneMinuteAgo);
+      
+      // Update current BPM
+      setCurrentBPM(recentBlinksRef.current.length);
+    }, 5000); // Update every 5 seconds
+
+    return () => {
+      clearInterval(bpmUpdateInterval);
+    };
+  }, []);
+
   useEffect(() => {
     let camera: any | null = null;
 
     const initCamera = async () => {
       try {
         // Wait for MediaPipe libraries to load
+        // Wait for MediaPipe libraries to load
         if (typeof window.FaceMesh === "undefined" || typeof window.Camera === "undefined") {
           setTimeout(initCamera, 100);
           return;
         }
 
-        // Define face mesh instance
+        // Define face mesh instance with simplified config
         const faceMesh = new window.FaceMesh({
           locateFile: (file: string) => {
             return `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`;
@@ -244,7 +275,7 @@ export default function Dashboard() {
 
         faceMesh.setOptions({
           maxNumFaces: 1,
-          refineLandmarks: true,
+          refineLandmarks: false,
           minDetectionConfidence: 0.5,
           minTrackingConfidence: 0.5,
         });
@@ -305,22 +336,40 @@ export default function Dashboard() {
             setLeftEyeRedness(leftRedness);
             setRightEyeRedness(rightRedness);
           }
-
           // Blink detection
           const leftEAR = calcEAR(landmarks, LEFT_EYE);
           const rightEAR = calcEAR(landmarks, RIGHT_EYE);
           const avgEAR = (leftEAR + rightEAR) / 2.0;
 
-          if (avgEAR < 0.21 && !blinkStateRef.current) {
+          // Debug: Log EAR values more frequently
+          if (Math.random() < 0.05) {
+            console.log('EAR:', avgEAR.toFixed(3), 'Threshold: 0.30', 'Blinking:', blinkStateRef.current);
+          }
+
+          if (avgEAR < 0.30 && !blinkStateRef.current) {
+            const blinkTimestamp = Date.now();
+            console.log('Blink detected! EAR:', avgEAR.toFixed(3));
+            
             setBlinkCount((prev) => {
               const newCount = prev + 1;
-              const elapsedMinutes = (Date.now() - startTimeRef.current) / 60000;
+              const elapsedMinutes = (blinkTimestamp - startTimeRef.current) / 60000;
               setAvgBlinkRate(elapsedMinutes > 0 ? newCount / elapsedMinutes : 0);
               return newCount;
             });
+            
+            // Track recent blinks for current BPM (keep last 60 seconds)
+            recentBlinksRef.current.push(blinkTimestamp);
+            
+            // Remove blinks older than 60 seconds
+            const oneMinuteAgo = blinkTimestamp - 60000;
+            recentBlinksRef.current = recentBlinksRef.current.filter(t => t > oneMinuteAgo);
+            
+            // Update current BPM based on blinks in last 60 seconds
+            setCurrentBPM(recentBlinksRef.current.length);
+            
             setIsBlinking(true);
             blinkStateRef.current = true;
-          } else if (avgEAR >= 0.21) {
+          } else if (avgEAR >= 0.25) {
             setIsBlinking(false);
             blinkStateRef.current = false;
           }
@@ -344,14 +393,54 @@ export default function Dashboard() {
       }
     };
 
-    initCamera();
+    // Add delay to ensure DOM is ready
+    const timer = setTimeout(initCamera, 500);
 
     return () => {
+      clearTimeout(timer);
       if (camera) {
         camera.stop();
       }
     };
   }, [opencvLoaded]);
+
+  // Helper functions for derived insights
+  const getEyeHealthStatus = () => {
+    const avgRedness = (leftEyeRedness + rightEyeRedness) / 2;
+    if (avgRedness > 15) return { status: 'High Risk', color: '#ef4444', icon: '⚠️' };
+    if (avgRedness > 8) return { status: 'Moderate', color: '#f59e0b', icon: '⚡' };
+    return { status: 'Healthy', color: '#10b981', icon: '✓' };
+  };
+
+  const getBlinkHealthStatus = () => {
+    if (currentBPM === 0) return { status: 'Measuring...', color: '#6b7280', icon: '⏱️' };
+    if (currentBPM < 10) return { status: 'Too Low', color: '#ef4444', icon: '⚠️', message: 'Increase blink frequency' };
+    if (currentBPM > 25) return { status: 'Too High', color: '#f59e0b', icon: '⚡', message: 'May indicate eye strain' };
+    return { status: 'Optimal', color: '#10b981', icon: '✓', message: 'Normal blink rate' };
+  };
+
+  const getDominantEmotion = () => {
+    if (emotionHistory.length === 0) return 'No data';
+    const counts: { [key: string]: number } = {};
+    emotionHistory.forEach(e => {
+      counts[e] = (counts[e] || 0) + 1;
+    });
+    const sorted = Object.entries(counts).sort((a, b) => b[1] - a[1]);
+    return sorted[0]?.[0] || 'No data';
+  };
+
+  const getSessionDuration = () => {
+    const minutes = Math.floor((Date.now() - startTimeRef.current) / 60000);
+    if (minutes < 1) return '< 1 min';
+    if (minutes < 60) return `${minutes} min`;
+    const hours = Math.floor(minutes / 60);
+    const remainingMins = minutes % 60;
+    return `${hours}h ${remainingMins}m`;
+  };
+
+  const eyeHealthStatus = getEyeHealthStatus();
+  const blinkHealthStatus = getBlinkHealthStatus();
+  const dominantEmotion = getDominantEmotion();
 
   return (
     <div className="app-container">
@@ -372,129 +461,228 @@ export default function Dashboard() {
         </div>
       </nav>
 
-      {/* Hero Section */}
-      <div className="hero-section">
-        <div className="hero-content">
-          <div className="hero-badge">
-            <span className="badge-dot"></span>
-            <span>Powered by AI & Computer Vision</span>
-          </div>
-          <h1 className="hero-title">
-            Real-time Eye Health
-            <span className="gradient-text"> Monitoring</span>
-          </h1>
-          <p className="hero-subtitle">
-            Advanced AI-powered analysis for blink detection, emotion recognition,
-            and eye redness tracking. Get instant insights into your eye health.
-          </p>
-          <div className="hero-stats">
-            <div className="stat-item">
-              <div className="stat-value">30 FPS</div>
-              <div className="stat-label">Processing Speed</div>
-            </div>
-            <div className="stat-item">
-              <div className="stat-value">99.5%</div>
-              <div className="stat-label">Accuracy Rate</div>
-            </div>
-            <div className="stat-item">
-              <div className="stat-value">3 AI</div>
-              <div className="stat-label">Models Running</div>
-            </div>
-          </div>
-        </div>
-      </div>
-
       <div className="main-content">
-        <div className="video-container">
-          <video
-            ref={videoRef}
-            style={{ display: "none" }}
-            autoPlay
-            playsInline
-            muted
-            width="640"
-            height="480"
-          />
-          <canvas
-            ref={canvasRef}
-            width="640"
-            height="480"
-            className="video-canvas"
-          />
-          {eyesDetected && (
-            <div className="eyes-detected-badge">
-              <span className="badge-icon">✓</span>
-              <span>Eyes Detected</span>
+        {/* Top Section: Stats and Video Side by Side */}
+        <div className="top-section">
+          {/* Left Side: Stats Cards */}
+          <div className="stats-column">
+            <div className="stat-card">
+              <div className="stat-header">
+                <span className="stat-icon">👁️</span>
+                <span className="stat-title">Total Blinks</span>
+              </div>
+              <div className="stat-value-large">{blinkCount}</div>
+              <div className="stat-footer">
+                <span className="stat-label">Session: {getSessionDuration()}</span>
+              </div>
             </div>
-          )}
+
+            <div className="stat-card">
+              <div className="stat-header">
+                <span className="stat-icon">⚡</span>
+                <span className="stat-title">Current BPM</span>
+              </div>
+              <div className="stat-value-large">{currentBPM}</div>
+              <div className="stat-footer">
+                <span className="stat-label">Blinks per minute</span>
+              </div>
+            </div>
+
+            <div className="stat-card">
+              <div className="stat-header">
+                <span className="stat-icon">📊</span>
+                <span className="stat-title">Average BPM</span>
+              </div>
+              <div className="stat-value-large">{avgBlinkRate.toFixed(1)}</div>
+              <div className="stat-footer">
+                <span className="stat-label">Overall average</span>
+              </div>
+            </div>
+
+            <div className="stat-card">
+              <div className="stat-header">
+                <span className="stat-icon">😊</span>
+                <span className="stat-title">Current Emotion</span>
+              </div>
+              <div className="stat-value-medium">{emotion.split('(')[0]}</div>
+              <div className="stat-footer">
+                <span className="stat-label">{emotion.includes('(') ? emotion.split('(')[1]?.replace(')', '') : ''}</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Right Side: Video Feed */}
+          <div className="video-column">
+          <div className="video-container-large">
+            <video
+              ref={videoRef}
+              style={{ display: "none" }}
+              autoPlay
+              playsInline
+              muted
+              width="640"
+              height="480"
+            />
+            <canvas
+              ref={canvasRef}
+              width="640"
+              height="480"
+              className="video-canvas"
+            />
+            {eyesDetected && (
+              <div className="eyes-detected-badge">
+                <span className="badge-icon">✓</span>
+                <span>Eyes Detected</span>
+              </div>
+            )}
+            {isBlinking && (
+              <div className="blink-overlay">
+                <span className="blink-icon">👁️</span>
+                <span>Blink!</span>
+              </div>
+            )}
+          </div>
+          </div>
         </div>
 
-        <div className="dashboard">
-          <div className="dashboard-card">
-            <div className="card-icon">👁️</div>
-            <div className="card-content">
-              <h3 className="card-label">Total Blinks</h3>
-              <p className="card-value">{blinkCount}</p>
+        {/* Insights Grid */}
+        <div className="insights-grid">
+          {/* Eye Health Analysis */}
+          <div className="insight-card large-card">
+            <div className="insight-header">
+              <h3 className="insight-title">Eye Health Analysis</h3>
+              <span className="insight-badge" style={{ backgroundColor: eyeHealthStatus.color }}>
+                {eyeHealthStatus.icon} {eyeHealthStatus.status}
+              </span>
             </div>
-          </div>
-
-          <div className="dashboard-card">
-            <div className="card-icon">📊</div>
-            <div className="card-content">
-              <h3 className="card-label">Avg Blink Rate</h3>
-              <p className="card-value">{avgBlinkRate.toFixed(1)}</p>
-              <p className="card-unit">per minute</p>
-            </div>
-          </div>
-
-          <div className="dashboard-card">
-            <div className="card-icon">👀</div>
-            <div className="card-content">
-              <h3 className="card-label">Status</h3>
-              <p className={`card-status ${isBlinking ? "blinking" : "normal"}`}>
-                {isBlinking ? "Blinking" : "Eyes Open"}
-              </p>
-            </div>
-          </div>
-
-          <div className="dashboard-card emotion-card">
-            <div className="card-icon">😊</div>
-            <div className="card-content">
-              <h3 className="card-label">Current Emotion</h3>
-              <p className="card-value emotion-value">{emotion}</p>
-            </div>
-          </div>
-
-          <div className="dashboard-card redness-card">
-            <div className="card-icon">🔴</div>
-            <div className="card-content">
-              <h3 className="card-label">Eye Redness</h3>
-              <div className="redness-values">
-                <div className="redness-item">
-                  <span className="redness-label">Left:</span>
-                  <span className={`redness-value ${leftEyeRedness > 12 ? 'high' : 'normal'}`}>
-                    {leftEyeRedness.toFixed(1)}%
-                  </span>
+            <div className="insight-body">
+              <div className="redness-chart">
+                <div className="eye-redness-item">
+                  <div className="eye-label">
+                    <span className="eye-icon">👁️</span>
+                    <span>Left Eye</span>
+                  </div>
+                  <div className="redness-bar-container">
+                    <div 
+                      className="redness-bar" 
+                      style={{ 
+                        width: `${Math.min(leftEyeRedness * 5, 100)}%`,
+                        backgroundColor: leftEyeRedness > 12 ? '#ef4444' : '#10b981'
+                      }}
+                    ></div>
+                  </div>
+                  <span className="redness-percent">{leftEyeRedness.toFixed(1)}%</span>
                 </div>
-                <div className="redness-item">
-                  <span className="redness-label">Right:</span>
-                  <span className={`redness-value ${rightEyeRedness > 12 ? 'high' : 'normal'}`}>
-                    {rightEyeRedness.toFixed(1)}%
-                  </span>
+                <div className="eye-redness-item">
+                  <div className="eye-label">
+                    <span className="eye-icon">👁️</span>
+                    <span>Right Eye</span>
+                  </div>
+                  <div className="redness-bar-container">
+                    <div 
+                      className="redness-bar" 
+                      style={{ 
+                        width: `${Math.min(rightEyeRedness * 5, 100)}%`,
+                        backgroundColor: rightEyeRedness > 12 ? '#ef4444' : '#10b981'
+                      }}
+                    ></div>
+                  </div>
+                  <span className="redness-percent">{rightEyeRedness.toFixed(1)}%</span>
+                </div>
+              </div>
+              <div className="insight-recommendations">
+                <h4 className="rec-title">Recommendations</h4>
+                <ul className="rec-list">
+                  {(leftEyeRedness + rightEyeRedness) / 2 > 12 && (
+                    <>
+                      <li>Take a 20-minute break from screens</li>
+                      <li>Use eye drops for dryness</li>
+                      <li>Adjust screen brightness</li>
+                    </>
+                  )}
+                  {(leftEyeRedness + rightEyeRedness) / 2 <= 12 && (
+                    <>
+                      <li>✓ Eye redness levels are normal</li>
+                      <li>✓ Continue with regular breaks</li>
+                      <li>✓ Maintain good hydration</li>
+                    </>
+                  )}
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          {/* Blink Health Analysis */}
+          <div className="insight-card">
+            <div className="insight-header">
+              <h3 className="insight-title">Blink Health</h3>
+              <span className="insight-badge" style={{ backgroundColor: blinkHealthStatus.color }}>
+                {blinkHealthStatus.icon} {blinkHealthStatus.status}
+              </span>
+            </div>
+            <div className="insight-body">
+              <div className="blink-metric">
+                <div className="metric-item">
+                  <span className="metric-label">Current Rate</span>
+                  <span className="metric-value-big">{currentBPM} BPM</span>
+                </div>
+                <div className="metric-item">
+                  <span className="metric-label">Session Average</span>
+                  <span className="metric-value-big">{avgBlinkRate.toFixed(1)} BPM</span>
+                </div>
+                <div className="metric-item">
+                  <span className="metric-label">Healthy Range</span>
+                  <span className="metric-value">15-20 BPM</span>
+                </div>
+              </div>
+              {blinkHealthStatus.message && (
+                <div className="health-message">
+                  <p>{blinkHealthStatus.message}</p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Emotion Analysis */}
+          <div className="insight-card">
+            <div className="insight-header">
+              <h3 className="insight-title">Emotion Analysis</h3>
+              <span className="insight-badge" style={{ backgroundColor: '#8b5cf6' }}>
+                🎭 Active
+              </span>
+            </div>
+            <div className="insight-body">
+              <div className="emotion-display">
+                <div className="current-emotion">
+                  <span className="emotion-label">Current</span>
+                  <span className="emotion-value">{emotion.split('(')[0]}</span>
+                  <span className="emotion-confidence">{emotion.includes('(') ? emotion.split('(')[1]?.replace(')', '') : ''}</span>
+                </div>
+                <div className="dominant-emotion">
+                  <span className="emotion-label">Dominant (Session)</span>
+                  <span className="emotion-value-small">{dominantEmotion}</span>
+                </div>
+              </div>
+              <div className="emotion-timeline">
+                <span className="timeline-label">Recent history:</span>
+                <div className="timeline-dots">
+                  {emotionHistory.slice(-10).map((e, i) => (
+                    <span 
+                      key={i} 
+                      className="emotion-dot"
+                      title={e}
+                    >
+                      {e === 'happy' ? '😊' : e === 'sad' ? '😢' : e === 'angry' ? '😠' : 
+                       e === 'fearful' ? '😨' : e === 'surprised' ? '😲' : e === 'disgusted' ? '🤢' : '😐'}
+                    </span>
+                  ))}
                 </div>
               </div>
             </div>
           </div>
         </div>
 
-        {isBlinking && (
-          <div className="blink-alert">
-            <span className="blink-icon">👁️</span>
-            <span>Blink Detected!</span>
-          </div>
-        )}
-
-        {/* Feature Highlights */}
+        {/* System Status */}
         <div className="features-section" id="features">
           <h2 className="section-title">Advanced AI Capabilities</h2>
           <div className="features-grid">
