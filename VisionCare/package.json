@@ -12,6 +12,10 @@
   "dependencies": {
     "@mediapipe/camera_utils": "^0.3.1675466862",
     "@mediapipe/face_mesh": "^0.4.1633559619",
+    "@tensorflow/tfjs": "^4.22.0",
+    "@vladmandic/human": "^3.3.6",
+    "face-api.js": "^0.22.2",
+    "opencv.js": "^1.2.1",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },
